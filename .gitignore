@@ -1,0 +1,13 @@
+*.iml
+.gradle/
+/build
+/app/build
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+# Machine-specific SDK path — must not be committed.
+local.properties

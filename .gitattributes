@@ -1,0 +1,6 @@
+# Normalise text files in the repo, but keep the Gradle wrapper shell script LF
+# only — CRLF makes it unrunnable on Linux/macOS and in CI.
+* text=auto
+gradlew text eol=lf
+*.bat text eol=crlf
+gradle/wrapper/gradle-wrapper.jar binary

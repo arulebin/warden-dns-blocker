@@ -1,0 +1,206 @@
+package com.arulebin.warden
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.VpnService
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import androidx.core.app.NotificationCompat
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+/**
+ * Local VPN that filters DNS over both IPv4 and IPv6. The system is told to use
+ * a virtual DNS server in each family; only those addresses are routed into the
+ * tunnel. Blocklisted domains get NXDOMAIN; the rest are forwarded to the
+ * configured upstream resolver over a protect()-ed socket.
+ */
+class WardenVpnService : VpnService() {
+
+    private var tunnel: ParcelFileDescriptor? = null
+    private var out: FileOutputStream? = null
+    private var readThread: Thread? = null
+    private var forwarders: ExecutorService? = null
+    private val writeLock = Any()
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Prefs.init(this)
+        Rules.init(this)
+        Stats.init(this)
+        if (intent?.action == ACTION_DISCONNECT) {
+            stopVpn()
+            return START_NOT_STICKY
+        }
+        startVpn()
+        return START_STICKY
+    }
+
+    private fun startVpn() {
+        if (tunnel != null) return
+
+        val fd = try {
+            Builder()
+                .setSession("Warden")
+                .addAddress(TUN_V4, 24)
+                .addDnsServer(DNS_V4)
+                .addRoute(DNS_V4, 32)
+                .addAddress(TUN_V6, 64)
+                .addDnsServer(DNS_V6)
+                .addRoute(DNS_V6, 128)
+                .setBlocking(true)
+                .establish()
+        } catch (e: Exception) {
+            null
+        }
+
+        if (fd == null) {
+            WardenState.running = false
+            stopSelf()
+            return
+        }
+        tunnel = fd
+        startForegroundWithNotification()
+        WardenState.running = true
+        forwarders = Executors.newCachedThreadPool()
+        readThread = Thread({ runPacketLoop(fd) }, "warden-dns").also { it.start() }
+    }
+
+    private fun runPacketLoop(fd: ParcelFileDescriptor) {
+        val input = FileInputStream(fd.fileDescriptor)
+        out = FileOutputStream(fd.fileDescriptor)
+        val buffer = ByteArray(MAX_PACKET)
+        try {
+            while (!Thread.currentThread().isInterrupted) {
+                val n = input.read(buffer)
+                if (n <= 0) continue
+                handlePacket(buffer.copyOf(n))
+            }
+        } catch (e: Exception) {
+            // tunnel closed / interrupted — normal during stop
+        }
+    }
+
+    private fun handlePacket(packet: ByteArray) {
+        val query = DnsUtils.parseDnsQuery(packet, packet.size) ?: return
+        val blocked = Rules.isBlocked(query.domain)
+        Stats.record(blocked)
+        QueryLog.add(query.domain, blocked)
+        if (blocked) {
+            val dns = DnsUtils.buildNxDomainResponse(query.dnsMessage)
+            writePacket(DnsUtils.buildResponsePacket(query, dns))
+        } else {
+            forwarders?.execute { forwardUpstream(query) }
+        }
+    }
+
+    private fun forwardUpstream(query: DnsUtils.DnsQuery) {
+        var socket: DatagramSocket? = null
+        try {
+            socket = DatagramSocket()
+            protect(socket)
+            socket.soTimeout = UPSTREAM_TIMEOUT_MS
+            val upstream = InetAddress.getByName(Prefs.upstreamDns)
+            socket.send(DatagramPacket(query.dnsMessage, query.dnsMessage.size, upstream, 53))
+            val buf = ByteArray(MAX_PACKET)
+            val reply = DatagramPacket(buf, buf.size)
+            socket.receive(reply)
+            writePacket(DnsUtils.buildResponsePacket(query, buf.copyOf(reply.length)))
+        } catch (e: Exception) {
+            // upstream timeout/failure — drop; the client retries
+        } finally {
+            socket?.close()
+        }
+    }
+
+    private fun writePacket(packet: ByteArray) {
+        val o = out ?: return
+        synchronized(writeLock) {
+            try {
+                o.write(packet)
+                o.flush()
+            } catch (e: Exception) {
+                // tunnel gone
+            }
+        }
+    }
+
+    private fun stopVpn() {
+        teardown()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun teardown() {
+        readThread?.interrupt()
+        readThread = null
+        forwarders?.shutdownNow()
+        forwarders = null
+        try { out?.close() } catch (_: Exception) {}
+        out = null
+        try { tunnel?.close() } catch (_: Exception) {}
+        tunnel = null
+        Stats.persist()
+        WardenState.running = false
+    }
+
+    override fun onRevoke() = stopVpn()
+
+    override fun onDestroy() {
+        super.onDestroy()
+        teardown()
+    }
+
+    private fun startForegroundWithNotification() {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "Warden protection", NotificationManager.IMPORTANCE_LOW),
+            )
+        }
+        val openIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+        )
+        val stopIntent = PendingIntent.getService(
+            this, 1,
+            Intent(this, WardenVpnService::class.java).setAction(ACTION_DISCONNECT),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Warden is on")
+            .setContentText("Filtering DNS to block unwanted sites")
+            .setSmallIcon(R.drawable.ic_warden_shield)
+            .setOngoing(true)
+            .setContentIntent(openIntent)
+            .addAction(R.drawable.ic_warden_shield, "Stop", stopIntent)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    companion object {
+        const val ACTION_CONNECT = "com.arulebin.warden.action.CONNECT"
+        const val ACTION_DISCONNECT = "com.arulebin.warden.action.DISCONNECT"
+
+        private const val CHANNEL_ID = "warden_vpn"
+        private const val NOTIFICATION_ID = 1
+        private const val TUN_V4 = "10.215.173.1"
+        private const val DNS_V4 = "10.215.173.2"
+        private const val TUN_V6 = "fd00:2:fd00::1"
+        private const val DNS_V6 = "fd00:2:fd00::2"
+        private const val UPSTREAM_TIMEOUT_MS = 5000
+        private const val MAX_PACKET = 32767
+    }
+}
