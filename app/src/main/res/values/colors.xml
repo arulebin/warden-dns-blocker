@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ink">#0C1226</color>
-    <color name="shield">#2FE0C0</color>
+    <!-- Mirrors LightPalette in Theme.kt; values-night mirrors DarkPalette. Used before
+         Compose draws (window background, splash) so launch has no color flash. -->
+    <color name="window_background">#F1F4F0</color>
+    <color name="guard">#0E7A5C</color>
+    <color name="on_guard">#FFFFFF</color>
 </resources>

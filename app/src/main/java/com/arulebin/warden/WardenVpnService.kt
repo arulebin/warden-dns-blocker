@@ -15,6 +15,7 @@ import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -78,6 +79,8 @@ class WardenVpnService : VpnService() {
         val input = FileInputStream(fd.fileDescriptor)
         out = FileOutputStream(fd.fileDescriptor)
         val buffer = ByteArray(MAX_PACKET)
+        // Don't answer anything until the big lists are in memory, or early lookups slip through.
+        Rules.awaitLoaded()
         try {
             while (!Thread.currentThread().isInterrupted) {
                 val n = input.read(buffer)
@@ -91,14 +94,61 @@ class WardenVpnService : VpnService() {
 
     private fun handlePacket(packet: ByteArray) {
         val query = DnsUtils.parseDnsQuery(packet, packet.size) ?: return
-        val blocked = Rules.isBlocked(query.domain)
+        // Encrypted-DNS endpoints are refused even if allowlisted: reaching one would skip every other rule.
+        val blocked = SearchGuard.isBypass(query.domain) || Rules.isBlocked(query.domain)
         Stats.record(blocked)
         QueryLog.add(query.domain, blocked)
-        if (blocked) {
-            val dns = DnsUtils.buildNxDomainResponse(query.dnsMessage)
-            writePacket(DnsUtils.buildResponsePacket(query, dns))
-        } else {
-            forwarders?.execute { forwardUpstream(query) }
+        val safeHost = if (blocked) null else SearchGuard.safeTarget(query.domain)
+        when {
+            blocked -> {
+                val dns = DnsUtils.buildNxDomainResponse(query.dnsMessage)
+                writePacket(DnsUtils.buildResponsePacket(query, dns))
+            }
+            safeHost != null -> forwarders?.execute { answerWithSafeHost(query, safeHost) }
+            else -> forwarders?.execute { forwardUpstream(query) }
+        }
+    }
+
+    private class CachedIps(val ips: List<ByteArray>, val expiresAt: Long)
+    private val safeCache = ConcurrentHashMap<String, CachedIps>()
+
+    /**
+     * Answers a search/video hostname with the addresses of its SafeSearch host.
+     * Only A records are served; AAAA and HTTPS queries get an empty answer so
+     * clients fall back to the IPv4 SafeSearch address instead of a native one.
+     */
+    private fun answerWithSafeHost(query: DnsUtils.DnsQuery, safeHost: String) {
+        if (query.qtype != DnsUtils.TYPE_A) {
+            writePacket(DnsUtils.buildResponsePacket(query, DnsUtils.buildAnswerResponse(query, emptyList())))
+            return
+        }
+        val now = System.currentTimeMillis()
+        val ips = safeCache[safeHost]?.takeIf { it.expiresAt > now }?.ips
+            ?: resolveA(safeHost).also {
+                if (it.isNotEmpty()) safeCache[safeHost] = CachedIps(it, now + SAFE_CACHE_MS)
+            }
+        // If the safe host can't be resolved, stay silent (the client retries) rather than
+        // falling back to the unfiltered site.
+        if (ips.isEmpty()) return
+        writePacket(DnsUtils.buildResponsePacket(query, DnsUtils.buildAnswerResponse(query, ips)))
+    }
+
+    private fun resolveA(name: String): List<ByteArray> {
+        var socket: DatagramSocket? = null
+        return try {
+            socket = DatagramSocket()
+            protect(socket)
+            socket.soTimeout = UPSTREAM_TIMEOUT_MS
+            val msg = DnsUtils.buildQuery((System.nanoTime() and 0xFFFF).toInt(), name, DnsUtils.TYPE_A)
+            socket.send(DatagramPacket(msg, msg.size, InetAddress.getByName(Prefs.upstreamDns), 53))
+            val buf = ByteArray(MAX_PACKET)
+            val reply = DatagramPacket(buf, buf.size)
+            socket.receive(reply)
+            DnsUtils.parseARecords(buf.copyOf(reply.length))
+        } catch (e: Exception) {
+            emptyList()
+        } finally {
+            socket?.close()
         }
     }
 
@@ -201,6 +251,7 @@ class WardenVpnService : VpnService() {
         private const val TUN_V6 = "fd00:2:fd00::1"
         private const val DNS_V6 = "fd00:2:fd00::2"
         private const val UPSTREAM_TIMEOUT_MS = 5000
+        private const val SAFE_CACHE_MS = 10 * 60 * 1000L
         private const val MAX_PACKET = 32767
     }
 }

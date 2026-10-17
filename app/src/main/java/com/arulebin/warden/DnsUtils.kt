@@ -15,7 +15,15 @@ object DnsUtils {
         val dstPort: Int,
         val dnsMessage: ByteArray,
         val domain: String,
+        /** Record type asked for (1 = A, 28 = AAAA, 65 = HTTPS, …). */
+        val qtype: Int,
+        /** Offset just past the first question: header + question, without EDNS extras. */
+        val questionEnd: Int,
     )
+
+    const val TYPE_A = 1
+
+    private class Question(val domain: String, val qtype: Int, val end: Int)
 
     private const val PROTO_UDP = 17
 
@@ -38,8 +46,8 @@ object DnsUtils {
         val dnsOff = u + 8
         if (len < dnsOff + 12) return null
         val dns = p.copyOfRange(dnsOff, len)
-        val domain = extractDomain(dns) ?: return null
-        return DnsQuery(false, p.copyOfRange(12, 16), p.copyOfRange(16, 20), u16(p, u), u16(p, u + 2), dns, domain)
+        val q = extractQuestion(dns) ?: return null
+        return DnsQuery(false, p.copyOfRange(12, 16), p.copyOfRange(16, 20), u16(p, u), u16(p, u + 2), dns, q.domain, q.qtype, q.end)
     }
 
     private fun parseV6(p: ByteArray, len: Int): DnsQuery? {
@@ -50,12 +58,12 @@ object DnsUtils {
         val dnsOff = u + 8
         if (len < dnsOff + 12) return null
         val dns = p.copyOfRange(dnsOff, len)
-        val domain = extractDomain(dns) ?: return null
-        return DnsQuery(true, p.copyOfRange(8, 24), p.copyOfRange(24, 40), u16(p, u), u16(p, u + 2), dns, domain)
+        val q = extractQuestion(dns) ?: return null
+        return DnsQuery(true, p.copyOfRange(8, 24), p.copyOfRange(24, 40), u16(p, u), u16(p, u + 2), dns, q.domain, q.qtype, q.end)
     }
 
-    /** First question's QNAME — DNS encodes it as length-prefixed labels. */
-    private fun extractDomain(dns: ByteArray): String? {
+    /** First question's QNAME and QTYPE — DNS encodes the name as length-prefixed labels. */
+    private fun extractQuestion(dns: ByteArray): Question? {
         var pos = 12
         val sb = StringBuilder()
         while (pos < dns.size) {
@@ -68,7 +76,89 @@ object DnsUtils {
             for (i in 0 until labelLen) sb.append((dns[pos + i].toInt() and 0xFF).toChar())
             pos += labelLen
         }
-        return if (sb.isEmpty()) null else sb.toString().lowercase()
+        if (sb.isEmpty()) return null
+        pos++ // the terminating zero label
+        if (pos + 4 > dns.size) return null
+        return Question(sb.toString().lowercase(), u16(dns, pos), pos + 4)
+    }
+
+    /** A standalone recursive query for [name], used to look up SafeSearch hosts. */
+    fun buildQuery(id: Int, name: String, qtype: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        out.write(id ushr 8); out.write(id and 0xFF)
+        out.write(0x01); out.write(0x00) // RD
+        out.write(0); out.write(1)       // QDCOUNT
+        repeat(6) { out.write(0) }       // AN/NS/AR counts
+        for (label in name.trimEnd('.').split('.')) {
+            out.write(label.length)
+            label.forEach { out.write(it.code) }
+        }
+        out.write(0)
+        out.write(qtype ushr 8); out.write(qtype and 0xFF)
+        out.write(0); out.write(1) // class IN
+        return out.toByteArray()
+    }
+
+    /** IPv4 addresses from the A records in a response (CNAME hops are skipped over). */
+    fun parseARecords(msg: ByteArray): List<ByteArray> {
+        if (msg.size < 12 || (msg[3].toInt() and 0x0F) != 0) return emptyList()
+        val questions = u16(msg, 4)
+        val answers = u16(msg, 6)
+        var pos = 12
+        repeat(questions) {
+            pos = skipName(msg, pos) ?: return emptyList()
+            pos += 4
+        }
+        val ips = ArrayList<ByteArray>()
+        for (i in 0 until answers) {
+            pos = skipName(msg, pos) ?: break
+            if (pos + 10 > msg.size) break
+            val type = u16(msg, pos)
+            val rdLength = u16(msg, pos + 8)
+            pos += 10
+            if (pos + rdLength > msg.size) break
+            if (type == TYPE_A && rdLength == 4) ips.add(msg.copyOfRange(pos, pos + 4))
+            pos += rdLength
+        }
+        return ips
+    }
+
+    private fun skipName(msg: ByteArray, start: Int): Int? {
+        var pos = start
+        while (pos < msg.size) {
+            val len = msg[pos].toInt() and 0xFF
+            when {
+                len == 0 -> return pos + 1
+                len and 0xC0 == 0xC0 -> return pos + 2
+                else -> pos += len + 1
+            }
+        }
+        return null
+    }
+
+    /**
+     * Answer [q] with the given IPv4 addresses under its own name. With an empty
+     * list this is a NOERROR/no-data reply, which tells the client "no records of
+     * that type" without failing the name (used for AAAA/HTTPS under SafeSearch).
+     */
+    fun buildAnswerResponse(q: DnsQuery, ips: List<ByteArray>, ttl: Int = 300): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val header = q.dnsMessage.copyOf(q.questionEnd)
+        header[2] = (0x80 or (q.dnsMessage[2].toInt() and 0x79)).toByte() // QR + keep Opcode/RD
+        header[3] = 0x80.toByte()                                          // RA, RCODE 0
+        header[4] = 0; header[5] = 1
+        header[6] = (ips.size ushr 8).toByte(); header[7] = ips.size.toByte()
+        header[8] = 0; header[9] = 0; header[10] = 0; header[11] = 0
+        out.write(header)
+        for (ip in ips) {
+            out.write(0xC0); out.write(0x0C)       // name: pointer to the question
+            out.write(0); out.write(TYPE_A)
+            out.write(0); out.write(1)             // class IN
+            out.write(ttl ushr 24); out.write(ttl ushr 16); out.write(ttl ushr 8); out.write(ttl)
+            out.write(0); out.write(4)
+            out.write(ip)
+        }
+        return out.toByteArray()
     }
 
     fun buildNxDomainResponse(query: ByteArray): ByteArray {

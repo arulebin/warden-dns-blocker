@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="window_background">#0A1310</color>
+    <color name="guard">#5BE3AE</color>
+    <color name="on_guard">#03261A</color>
+</resources>

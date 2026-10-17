@@ -8,11 +8,22 @@
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:type="linear"
-                android:startX="0" android:startY="0"
-                android:endX="108" android:endY="108"
-                android:startColor="#0C1226"
-                android:endColor="#172241" />
+                android:type="radial"
+                android:centerX="54" android:centerY="50"
+                android:gradientRadius="76"
+                android:startColor="#16392D"
+                android:endColor="#0A1310" />
         </aapt:attr>
     </path>
+    <!-- faint radar rings -->
+    <path
+        android:pathData="M54,18a36,36 0 1,1 0,72a36,36 0 1,1 0,-72z"
+        android:strokeColor="#5BE3AE"
+        android:strokeAlpha="0.14"
+        android:strokeWidth="1.2" />
+    <path
+        android:pathData="M54,30a24,24 0 1,1 0,48a24,24 0 1,1 0,-48z"
+        android:strokeColor="#5BE3AE"
+        android:strokeAlpha="0.22"
+        android:strokeWidth="1.2" />
 </vector>

@@ -17,6 +17,16 @@ object Prefs {
     var scheduleEnabled by mutableStateOf(false); private set
     var scheduleStartHour by mutableStateOf(22); private set
     var scheduleEndHour by mutableStateOf(6); private set
+    var themeMode by mutableStateOf(ThemeMode.System); private set
+
+    // Focus streak. focusStart == 0 means no streak is running.
+    var focusStart by mutableStateOf(0L); private set
+    var focusBest by mutableStateOf(0L); private set
+    var focusResets by mutableStateOf(0); private set
+
+    // Extra protections that sit alongside the adult category.
+    var safeSearch by mutableStateOf(false); private set
+    var blockBypass by mutableStateOf(false); private set
     val enabledCategories = mutableStateListOf<String>()
 
     private var pinHash: String? = null
@@ -31,6 +41,12 @@ object Prefs {
         scheduleEnabled = p.getBoolean("sched_enabled", false)
         scheduleStartHour = p.getInt("sched_start", 22)
         scheduleEndHour = p.getInt("sched_end", 6)
+        focusStart = p.getLong("focus_start", 0L)
+        focusBest = p.getLong("focus_best", 0L)
+        focusResets = p.getInt("focus_resets", 0)
+        safeSearch = p.getBoolean("safe_search", false)
+        blockBypass = p.getBoolean("block_bypass", false)
+        themeMode = ThemeMode.entries.firstOrNull { it.name == p.getString("theme", null) } ?: ThemeMode.System
         pinHash = p.getString("pin_hash", null)
         pinSalt = p.getString("pin_salt", null)
         p.getStringSet("categories", emptySet())?.let { enabledCategories.addAll(it) }
@@ -39,6 +55,38 @@ object Prefs {
     fun updateUpstreamDns(value: String) {
         upstreamDns = value
         sp?.edit()?.putString("upstream", value)?.apply()
+    }
+
+    fun updateThemeMode(value: ThemeMode) {
+        themeMode = value
+        sp?.edit()?.putString("theme", value.name)?.apply()
+    }
+
+    fun startFocus(at: Long = System.currentTimeMillis()) {
+        focusStart = at
+        sp?.edit()?.putLong("focus_start", at)?.apply()
+    }
+
+    /** Ends the current run (keeping the best) and immediately starts a new one. */
+    fun resetFocus(now: Long = System.currentTimeMillis()) {
+        if (focusStart > 0) focusBest = maxOf(focusBest, now - focusStart)
+        focusResets += 1
+        focusStart = now
+        sp?.edit()
+            ?.putLong("focus_best", focusBest)
+            ?.putInt("focus_resets", focusResets)
+            ?.putLong("focus_start", now)
+            ?.apply()
+    }
+
+    fun updateSafeSearch(value: Boolean) {
+        safeSearch = value
+        sp?.edit()?.putBoolean("safe_search", value)?.apply()
+    }
+
+    fun updateBlockBypass(value: Boolean) {
+        blockBypass = value
+        sp?.edit()?.putBoolean("block_bypass", value)?.apply()
     }
 
     fun updateScheduleEnabled(value: Boolean) {
