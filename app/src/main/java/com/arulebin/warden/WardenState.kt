@@ -13,4 +13,6 @@ import androidx.compose.runtime.setValue
  */
 object WardenState {
     var running by mutableStateOf(false)
+    /** True while the tunnel is up in full-tunnel mode, i.e. the AI egress ledger is recording. */
+    var ledgerActive by mutableStateOf(false)
 }

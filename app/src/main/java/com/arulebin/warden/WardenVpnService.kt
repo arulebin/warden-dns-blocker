@@ -10,6 +10,11 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import com.arulebin.egressledger.capture.FlowKey
+import com.arulebin.egressledger.capture.Packets
+import com.arulebin.egressledger.capture.TcpReset
+import com.arulebin.egressledger.ledger.Decision
+import com.arulebin.egressledger.ledger.EgressInspector
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -20,10 +25,15 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
- * Local VPN that filters DNS over both IPv4 and IPv6. The system is told to use
- * a virtual DNS server in each family; only those addresses are routed into the
- * tunnel. Blocklisted domains get NXDOMAIN; the rest are forwarded to the
- * configured upstream resolver over a protect()-ed socket.
+ * Local VPN that filters DNS over both IPv4 and IPv6, in one of two modes:
+ *
+ * - DNS-only (default): the system is told to use a virtual DNS server in each
+ *   family and only those addresses are routed into the tunnel. Blocklisted
+ *   domains get NXDOMAIN; the rest are forwarded to the configured upstream
+ *   resolver over a protect()-ed socket.
+ * - Full tunnel (AI egress ledger on, Android 10+): every route goes into the
+ *   tunnel. DNS is still answered here exactly as above; everything else passes
+ *   the ledger's inspector and is then relayed by [FullTunnel].
  */
 class WardenVpnService : VpnService() {
 
@@ -33,13 +43,22 @@ class WardenVpnService : VpnService() {
     private var forwarders: ExecutorService? = null
     private val writeLock = Any()
 
+    /** Set only in full-tunnel mode. */
+    private var fullTunnel: FullTunnel? = null
+    private var inspector: EgressInspector? = null
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Prefs.init(this)
         Rules.init(this)
         Stats.init(this)
-        if (intent?.action == ACTION_DISCONNECT) {
-            stopVpn()
-            return START_NOT_STICKY
+        Egress.init(this)
+        when (intent?.action) {
+            ACTION_DISCONNECT -> {
+                stopVpn()
+                return START_NOT_STICKY
+            }
+            // A mode change (ledger on/off) needs different routes, which only a fresh tunnel can have.
+            ACTION_RESTART -> if (tunnel != null) teardown() else return START_NOT_STICKY
         }
         startVpn()
         return START_STICKY
@@ -48,15 +67,35 @@ class WardenVpnService : VpnService() {
     private fun startVpn() {
         if (tunnel != null) return
 
+        inspector = Egress.newInspector(this)
+        val full = if (inspector != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Bring the relay up before routing everything to it; if it can't start, fall
+            // back to DNS-only rather than establishing a tunnel that goes nowhere.
+            FullTunnel(this) { buf, n -> writePacket(buf, n) }.takeIf { it.start() }
+        } else {
+            null
+        }
+        fullTunnel = full
+
         val fd = try {
             Builder()
                 .setSession("Warden")
                 .addAddress(TUN_V4, 24)
                 .addDnsServer(DNS_V4)
-                .addRoute(DNS_V4, 32)
                 .addAddress(TUN_V6, 64)
                 .addDnsServer(DNS_V6)
-                .addRoute(DNS_V6, 128)
+                .apply {
+                    if (full != null) {
+                        setMtu(FullTunnel.MTU)
+                        addRoute("0.0.0.0", 0)
+                        addRoute("::", 0)
+                        // Warden's own sockets (relay, upstream DNS, list downloads) go straight out.
+                        addDisallowedApplication(packageName)
+                    } else {
+                        addRoute(DNS_V4, 32)
+                        addRoute(DNS_V6, 128)
+                    }
+                }
                 .setBlocking(true)
                 .establish()
         } catch (e: Exception) {
@@ -64,6 +103,8 @@ class WardenVpnService : VpnService() {
         }
 
         if (fd == null) {
+            full?.stop()
+            fullTunnel = null
             WardenState.running = false
             stopSelf()
             return
@@ -71,6 +112,7 @@ class WardenVpnService : VpnService() {
         tunnel = fd
         startForegroundWithNotification()
         WardenState.running = true
+        WardenState.ledgerActive = full != null
         forwarders = Executors.newCachedThreadPool()
         readThread = Thread({ runPacketLoop(fd) }, "warden-dns").also { it.start() }
     }
@@ -85,17 +127,48 @@ class WardenVpnService : VpnService() {
             while (!Thread.currentThread().isInterrupted) {
                 val n = input.read(buffer)
                 if (n <= 0) continue
-                handlePacket(buffer.copyOf(n))
+                handlePacket(buffer, n)
             }
         } catch (e: Exception) {
             // tunnel closed / interrupted — normal during stop
         }
     }
 
-    private fun handlePacket(packet: ByteArray) {
-        val query = DnsUtils.parseDnsQuery(packet, packet.size) ?: return
+    /** [packet] is the loop's reused buffer: anything kept past this call must be copied. */
+    private fun handlePacket(packet: ByteArray, length: Int) {
+        val query = DnsUtils.parseDnsQuery(packet, length)
+        if (query != null) {
+            handleDns(query)
+            return
+        }
+        val stack = fullTunnel ?: return
+        // QUIC is held back: apps fall back to TCP, where the ClientHello names the endpoint.
+        if (Packets.udpDstPort(packet, length) == 443) return
+        val inspection = inspector?.onTcpPacket(packet, length)
+        if (inspection != null) Egress.flush()
+        if (inspection?.decision == Decision.DROP) {
+            resetFlow(packet, length, stack)
+            return
+        }
+        stack.toStack(packet, length)
+    }
+
+    /** Ends a blocked connection at its ClientHello: the app sees a reset, the stack drops its half. */
+    private fun resetFlow(packet: ByteArray, length: Int, stack: FullTunnel) {
+        val seg = Packets.parseTcp(packet, length) ?: return
+        writePacket(TcpReset.toClient(seg))
+        TcpReset.toServer(seg).let { stack.toStack(it, it.size) }
+    }
+
+    private fun handleDns(query: DnsUtils.DnsQuery) {
         // Encrypted-DNS endpoints are refused even if allowlisted: reaching one would skip every other rule.
-        val blocked = SearchGuard.isBypass(query.domain) || Rules.isBlocked(query.domain)
+        val filtered = SearchGuard.isBypass(query.domain) || Rules.isBlocked(query.domain)
+        // In DNS-only mode the lookup is the ledger's only signal. With the full tunnel the
+        // ClientHello is the record (one per real connection, unaffected by DNS caching).
+        val egressDrop = !filtered && fullTunnel == null &&
+            inspector?.onDnsQuery(flowOf(query), query.domain)
+                ?.also { Egress.flush() }?.decision == Decision.DROP
+        val blocked = filtered || egressDrop
         Stats.record(blocked)
         QueryLog.add(query.domain, blocked)
         val safeHost = if (blocked) null else SearchGuard.safeTarget(query.domain)
@@ -108,6 +181,12 @@ class WardenVpnService : VpnService() {
             else -> forwarders?.execute { forwardUpstream(query) }
         }
     }
+
+    private fun flowOf(q: DnsUtils.DnsQuery) = FlowKey(
+        Packets.PROTO_UDP,
+        InetAddress.getByAddress(q.srcIp), q.srcPort,
+        InetAddress.getByAddress(q.dstIp), q.dstPort,
+    )
 
     private class CachedIps(val ips: List<ByteArray>, val expiresAt: Long)
     private val safeCache = ConcurrentHashMap<String, CachedIps>()
@@ -171,11 +250,11 @@ class WardenVpnService : VpnService() {
         }
     }
 
-    private fun writePacket(packet: ByteArray) {
+    private fun writePacket(packet: ByteArray, length: Int = packet.size) {
         val o = out ?: return
         synchronized(writeLock) {
             try {
-                o.write(packet)
+                o.write(packet, 0, length)
                 o.flush()
             } catch (e: Exception) {
                 // tunnel gone
@@ -198,8 +277,13 @@ class WardenVpnService : VpnService() {
         out = null
         try { tunnel?.close() } catch (_: Exception) {}
         tunnel = null
+        fullTunnel?.stop()
+        fullTunnel = null
+        inspector = null
+        Egress.flush(force = true)
         Stats.persist()
         WardenState.running = false
+        WardenState.ledgerActive = false
     }
 
     override fun onRevoke() = stopVpn()
@@ -226,7 +310,10 @@ class WardenVpnService : VpnService() {
         )
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Warden is on")
-            .setContentText("Filtering DNS to block unwanted sites")
+            .setContentText(
+                if (fullTunnel != null) "Filtering DNS and recording apps' AI traffic"
+                else "Filtering DNS to block unwanted sites",
+            )
             .setSmallIcon(R.drawable.ic_warden_shield)
             .setOngoing(true)
             .setContentIntent(openIntent)
@@ -243,6 +330,7 @@ class WardenVpnService : VpnService() {
     companion object {
         const val ACTION_CONNECT = "com.arulebin.warden.action.CONNECT"
         const val ACTION_DISCONNECT = "com.arulebin.warden.action.DISCONNECT"
+        const val ACTION_RESTART = "com.arulebin.warden.action.RESTART"
 
         private const val CHANNEL_ID = "warden_vpn"
         private const val NOTIFICATION_ID = 1

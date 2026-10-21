@@ -27,6 +27,8 @@ object Prefs {
     // Extra protections that sit alongside the adult category.
     var safeSearch by mutableStateOf(false); private set
     var blockBypass by mutableStateOf(false); private set
+    /** The AI egress ledger (full tunnel). Only honoured where [Egress.supported]. */
+    var ledgerEnabled by mutableStateOf(false); private set
     val enabledCategories = mutableStateListOf<String>()
 
     private var pinHash: String? = null
@@ -46,6 +48,7 @@ object Prefs {
         focusResets = p.getInt("focus_resets", 0)
         safeSearch = p.getBoolean("safe_search", false)
         blockBypass = p.getBoolean("block_bypass", false)
+        ledgerEnabled = p.getBoolean("ledger_enabled", false)
         themeMode = ThemeMode.entries.firstOrNull { it.name == p.getString("theme", null) } ?: ThemeMode.System
         pinHash = p.getString("pin_hash", null)
         pinSalt = p.getString("pin_salt", null)
@@ -87,6 +90,11 @@ object Prefs {
     fun updateBlockBypass(value: Boolean) {
         blockBypass = value
         sp?.edit()?.putBoolean("block_bypass", value)?.apply()
+    }
+
+    fun updateLedgerEnabled(value: Boolean) {
+        ledgerEnabled = value
+        sp?.edit()?.putBoolean("ledger_enabled", value)?.apply()
     }
 
     fun updateScheduleEnabled(value: Boolean) {
