@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
         Prefs.init(this)
         Rules.init(this)
         Stats.init(this)
+        Egress.init(this)
         Scheduler.apply(this)
         Lists.refreshStale()
 
@@ -133,6 +134,7 @@ private val DESTINATIONS = listOf(
     Destination("Shield", WardenIcons.Shield),
     Destination("Focus", WardenIcons.Target),
     Destination("Lists", WardenIcons.Lists),
+    Destination("AI", WardenIcons.Sparkle),
     Destination("Settings", WardenIcons.Sliders),
 )
 
@@ -176,6 +178,7 @@ fun WardenApp(onArm: () -> Unit, onDisarm: () -> Unit) {
                     )
                     1 -> FocusScreen(insets, onArm = onArm)
                     2 -> ListsScreen(insets)
+                    3 -> LedgerScreen(insets)
                     else -> SettingsScreen(insets)
                 }
             }

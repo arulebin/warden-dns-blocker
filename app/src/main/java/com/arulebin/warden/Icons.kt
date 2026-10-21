@@ -76,6 +76,8 @@ object WardenIcons {
         "M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22",
         "M18 2H6v7a6 6 0 0 0 12 0V2z",
     )
+    val Sparkle = icon("M12 3l1.9 5.8L20 10.7l-6.1 1.9L12 18.5l-1.9-5.9L4 10.7l6.1-1.9z", "M19 3v4", "M21 5h-4")
+    val Download = icon("M12 3v12", "M7 10l5 5 5-5", "M5 21h14")
 }
 
 private fun icon(vararg paths: String): ImageVector =

@@ -7,7 +7,7 @@ import com.arulebin.egressledger.classify.Provider
 import com.arulebin.egressledger.ledger.EgressInspector
 import com.arulebin.egressledger.ledger.EgressLedger
 import com.arulebin.egressledger.ledger.EgressPolicy
-import java.io.File
+import java.io.Writer
 import java.util.concurrent.Executors
 
 /**
@@ -93,21 +93,18 @@ object Egress {
         }
     }
 
-    /** Writes the ledger as CSV for export — the corpus format, one row per app and provider. */
-    fun exportCsv(dir: File): File {
-        val file = File(dir, "egress-ledger.csv")
-        file.bufferedWriter().use { w ->
-            w.write("package,provider,kind,hosts,signals,first_seen,last_seen,connections,blocked\n")
-            for (e in ledger.snapshot()) {
-                val cells = listOf(
-                    e.app.label, e.provider.displayName, e.provider.kind.name,
-                    e.hosts.sorted().joinToString(" "), e.signals.joinToString(" ") { it.name },
-                    e.firstSeen.toString(), e.lastSeen.toString(), e.connections.toString(), e.blocked.toString(),
-                )
-                w.write(cells.joinToString(",") { "\"" + it.replace("\"", "\"\"") + "\"" })
-                w.write("\n")
-            }
+    /** Writes the ledger as CSV — the corpus format, one row per app and provider, times in epoch millis. */
+    fun exportCsv(out: Writer) {
+        out.write("package,provider,kind,hosts,signals,first_seen,last_seen,connections,blocked\n")
+        for (e in ledger.snapshot()) {
+            val cells = listOf(
+                e.app.label, e.provider.displayName, e.provider.kind.name,
+                e.hosts.sorted().joinToString(" "), e.signals.joinToString(" ") { it.name },
+                e.firstSeen.toString(), e.lastSeen.toString(), e.connections.toString(), e.blocked.toString(),
+            )
+            out.write(cells.joinToString(",") { "\"" + it.replace("\"", "\"\"") + "\"" })
+            out.write("\n")
         }
-        return file
+        out.flush()
     }
 }
