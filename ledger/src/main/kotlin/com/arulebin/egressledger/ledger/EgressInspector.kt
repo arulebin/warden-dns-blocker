@@ -23,12 +23,22 @@ class EgressInspector(
     private val policy: EgressPolicy,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
+    /**
+     * Recent hellos by flow. A retransmitted ClientHello must get the same decision
+     * (a dropped flow stays dropped) without being counted as a second connection.
+     */
+    private val recent = object : LinkedHashMap<FlowKey, Inspection>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<FlowKey, Inspection>?) = size > RECENT_FLOWS
+    }
+
     /** A TCP packet from the tunnel. DROP means the relay resets the connection instead of forwarding it. */
     fun onTcpPacket(packet: ByteArray, length: Int = packet.size): Inspection? {
+        if (!Packets.isTlsHandshakeTo443(packet, length)) return null
         val seg = Packets.parseTcp(packet, length) ?: return null
-        if (seg.flow.dstPort != 443 || seg.payloadLength == 0) return null
+        if (seg.payloadLength == 0) return null
         val host = TlsSni.extract(seg.packet, seg.payloadOffset, seg.payloadLength) ?: return null
-        return inspect(seg.flow, host, Signal.SNI)
+        synchronized(recent) { recent[seg.flow] }?.let { return it }
+        return inspect(seg.flow, host, Signal.SNI)?.also { synchronized(recent) { recent[seg.flow] = it } }
     }
 
     /** A DNS query Warden's resolver path already parsed; attributed the same way (UDP 5-tuple). */
@@ -41,5 +51,9 @@ class EgressInspector(
         val drop = app != null && policy.isBlocked(app.label, provider)
         if (app != null) ledger.record(app, provider, host, signal, clock(), drop)
         return Inspection(host, provider, app, if (drop) Decision.DROP else Decision.PASS)
+    }
+
+    private companion object {
+        const val RECENT_FLOWS = 256
     }
 }

@@ -3,6 +3,7 @@ package com.arulebin.egressledger.ledger
 import com.arulebin.egressledger.capture.FlowKey
 import com.arulebin.egressledger.classify.Provider
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /** The app that owns a connection. A shared UID can hold several packages, so all are kept. */
 data class AppIdentity(val uid: Int, val packages: List<String>) {
@@ -35,7 +36,36 @@ class LedgerEntry(val app: AppIdentity, val provider: Provider) {
         hosts += host
         signals += signal
     }
+
+    @Synchronized
+    internal fun restore(row: LedgerRow) {
+        firstSeen = row.firstSeen
+        lastSeen = row.lastSeen
+        connections = row.connections
+        blocked = row.blocked
+        hosts += row.hosts
+        signals += row.signals
+    }
+
+    @Synchronized
+    fun toRow() = LedgerRow(
+        app.uid, app.packages, provider, hosts.toSet(), signals.toSet(),
+        firstSeen, lastSeen, connections, blocked,
+    )
 }
+
+/** The persisted form of one ledger row — a plain value, so storage needs no knowledge of the live entry. */
+data class LedgerRow(
+    val uid: Int,
+    val packages: List<String>,
+    val provider: Provider,
+    val hosts: Set<String>,
+    val signals: Set<Signal>,
+    val firstSeen: Long,
+    val lastSeen: Long,
+    val connections: Int,
+    val blocked: Int,
+)
 
 /**
  * The ledger itself: every contact between an app and a third-party AI provider,
@@ -43,10 +73,29 @@ class LedgerEntry(val app: AppIdentity, val provider: Provider) {
  */
 class EgressLedger {
     private val entries = ConcurrentHashMap<Pair<String, Provider>, LedgerEntry>()
+    private val changes = AtomicLong()
+
+    /** Bumped on every change, so a UI or a persister can tell cheaply whether anything happened. */
+    val version: Long get() = changes.get()
 
     fun record(app: AppIdentity, provider: Provider, host: String, signal: Signal, at: Long, blocked: Boolean) {
         entries.computeIfAbsent(app.label to provider) { LedgerEntry(app, provider) }
             .record(host, signal, at, blocked)
+        changes.incrementAndGet()
+    }
+
+    /** Loads persisted rows (on startup, before any traffic is recorded). */
+    fun restore(rows: Collection<LedgerRow>) {
+        for (row in rows) {
+            val app = AppIdentity(row.uid, row.packages)
+            entries.computeIfAbsent(app.label to row.provider) { LedgerEntry(app, row.provider) }.restore(row)
+        }
+        changes.incrementAndGet()
+    }
+
+    fun clear() {
+        entries.clear()
+        changes.incrementAndGet()
     }
 
     fun snapshot(): List<LedgerEntry> = entries.values.sortedByDescending { it.lastSeen }
@@ -62,4 +111,11 @@ class EgressPolicy {
     fun block(pkg: String, provider: Provider) { blocks += pkg to provider }
     fun unblock(pkg: String, provider: Provider) { blocks -= pkg to provider }
     fun isBlocked(pkg: String, provider: Provider): Boolean = (pkg to provider) in blocks
+
+    fun blocks(): Set<Pair<String, Provider>> = blocks.toSet()
+
+    fun restore(saved: Collection<Pair<String, Provider>>) {
+        blocks.clear()
+        blocks += saved
+    }
 }
