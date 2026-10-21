@@ -41,6 +41,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":ledger"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -56,4 +57,8 @@ dependencies {
 
     // Tooling for @Preview rendering — debug builds only.
     debugImplementation(libs.androidx.ui.tooling)
+
+    // JVM unit tests (app/src/test) for the platform-free parts: rules, lists, relay.
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlin.test.junit)
 }

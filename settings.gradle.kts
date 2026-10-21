@@ -22,3 +22,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Warden"
 include(":app")
+// Plain-Kotlin core of the AI egress ledger: capture, classify, ledger, disclosure.
+include(":ledger")

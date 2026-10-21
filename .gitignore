@@ -2,6 +2,7 @@
 .gradle/
 /build
 /app/build
+/ledger/build
 .idea/
 .DS_Store
 captures/
@@ -11,3 +12,4 @@ captures/
 *.aab
 # Machine-specific SDK path — must not be committed.
 local.properties
+.kotlin/
