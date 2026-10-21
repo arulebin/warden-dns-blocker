@@ -40,6 +40,21 @@ class LedgerPersistenceTest {
         assertEquals(300, row.lastSeen)
     }
 
+    @Test fun `traffic recorded before the restore lands is merged, not overwritten`() {
+        val saved = EgressLedger().apply {
+            record(app, Provider.OPENAI, "api.openai.com", Signal.SNI, 100, blocked = true)
+        }.snapshot().map { it.toRow() }
+
+        val live = EgressLedger()
+        live.record(app, Provider.OPENAI, "api.openai.com", Signal.SNI, 500, blocked = false)
+        live.restore(saved)
+        val row = live.snapshot().single()
+        assertEquals(2, row.connections)
+        assertEquals(1, row.blocked)
+        assertEquals(100, row.firstSeen)
+        assertEquals(500, row.lastSeen)
+    }
+
     @Test fun `version moves on every change`() {
         val ledger = EgressLedger()
         val v0 = ledger.version

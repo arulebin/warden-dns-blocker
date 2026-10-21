@@ -9,6 +9,8 @@ import com.arulebin.egressledger.ledger.EgressLedger
 import com.arulebin.egressledger.ledger.EgressPolicy
 import java.io.Writer
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * App-wide home of the AI egress ledger: the live ledger and block policy, their
@@ -20,7 +22,7 @@ import java.util.concurrent.Executors
  */
 object Egress {
     private const val FILE = "warden_egress"
-    private const val FLUSH_EVERY_MS = 10_000L
+    private const val FLUSH_DELAY_MS = 5_000L
 
     val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
@@ -29,9 +31,9 @@ object Egress {
 
     private var sp: SharedPreferences? = null
     private var store: LedgerStore? = null
-    private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "warden-ledger-io").apply { isDaemon = true } }
+    private val io = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "warden-ledger-io").apply { isDaemon = true } }
+    private val flushPending = AtomicBoolean()
     @Volatile private var savedVersion = -1L
-    @Volatile private var lastFlush = 0L
 
     fun init(context: Context) {
         if (sp != null) return
@@ -71,18 +73,28 @@ object Egress {
 
     fun isBlocked(pkg: String, provider: Provider) = policy.isBlocked(pkg, provider)
 
-    /** Saves the ledger if it changed. [force] skips the throttle (used when the VPN stops). */
+    /**
+     * Saves the ledger soon. Calls within [FLUSH_DELAY_MS] coalesce into one write, and
+     * the write always comes after the latest change, so a burst's last record is never
+     * left unsaved. [force] writes now (used when the VPN stops).
+     */
     fun flush(force: Boolean = false) {
-        val now = System.currentTimeMillis()
-        if (!force && now - lastFlush < FLUSH_EVERY_MS) return
+        if (force) {
+            io.execute(::save)
+        } else if (flushPending.compareAndSet(false, true)) {
+            io.schedule({
+                flushPending.set(false)
+                save()
+            }, FLUSH_DELAY_MS, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    /** Runs on [io]. */
+    private fun save() {
         val version = ledger.version
         if (version == savedVersion) return
-        lastFlush = now
-        val rows = ledger.snapshot().map { it.toRow() }
-        io.execute {
-            store?.save(rows)
-            savedVersion = version
-        }
+        store?.save(ledger.snapshot().map { it.toRow() })
+        savedVersion = version
     }
 
     fun clear() {

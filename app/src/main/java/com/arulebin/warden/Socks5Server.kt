@@ -36,7 +36,7 @@ class Socks5Server(
 
     /** Binds an ephemeral loopback port and starts accepting. Returns the port. */
     fun start(): Int {
-        val s = ServerSocket(0, 128, InetAddress.getLoopbackAddress())
+        val s = ServerSocket(0, 128, LOOPBACK_V4)
         val p = Executors.newCachedThreadPool { r -> Thread(r, "warden-socks").apply { isDaemon = true } }
         server = s
         pool = p
@@ -131,7 +131,7 @@ class Socks5Server(
      * The association lives as long as the control TCP connection.
      */
     private fun associate(client: Socket, input: InputStream, output: OutputStream) {
-        val local = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
+        val local = DatagramSocket(InetSocketAddress(LOOPBACK_V4, 0))
         val outbound = DatagramSocket()
         try {
             protectUdp(outbound)
@@ -189,6 +189,12 @@ class Socks5Server(
     }
 
     companion object {
+        /**
+         * The stack is configured to dial 127.0.0.1. Not InetAddress.getLoopbackAddress():
+         * on Android that is ::1, and a socket bound there never sees the stack's IPv4 dial.
+         */
+        val LOOPBACK_V4: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+
         private const val VER = 5
         private const val CMD_CONNECT = 1
         private const val CMD_UDP_ASSOCIATE = 3

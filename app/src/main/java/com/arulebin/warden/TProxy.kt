@@ -15,11 +15,17 @@ object TProxy {
         System.loadLibrary("hev-socks5-tunnel")
     }
 
-    /** Starts the stack on its own native thread. [fd] is read and written as one IP packet per call. */
-    external fun TProxyStartService(configPath: String, fd: Int)
+    /**
+     * Starts the stack on its own native thread. [fd] is read and written as one IP
+     * packet per call. False if it is already running or the thread could not start.
+     */
+    external fun TProxyStartService(configPath: String, fd: Int): Boolean
 
     /** Stops the stack and joins its thread. Safe to call when not running. */
-    external fun TProxyStopService()
+    external fun TProxyStopService(): Boolean
+
+    /** False once the stack has exited, including on a config error after a successful start. */
+    external fun TProxyIsRunning(): Boolean
 
     /** tx packets, tx bytes, rx packets, rx bytes — as seen by the stack. */
     external fun TProxyGetStats(): LongArray

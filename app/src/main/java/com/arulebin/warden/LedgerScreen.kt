@@ -296,8 +296,11 @@ private fun AppCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            val lastSeen = entries.first().lastSeen
             Text(
-                DateUtils.getRelativeTimeSpanString(entries.first().lastSeen, now, DateUtils.MINUTE_IN_MILLIS).toString(),
+                // DateUtils says "0 minutes ago" under a minute.
+                if (now - lastSeen < DateUtils.MINUTE_IN_MILLIS) "Just now"
+                else DateUtils.getRelativeTimeSpanString(lastSeen, now, DateUtils.MINUTE_IN_MILLIS).toString(),
                 style = Warden.type.caption,
                 color = c.textFaint,
             )

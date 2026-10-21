@@ -23,6 +23,8 @@ android {
                 // Bind hev-socks5-tunnel's JNI natives to com.arulebin.warden.TProxy.
                 cFlags += listOf("-DPKGNAME=com/arulebin/warden", "-DCLSNAME=TProxy")
                 arguments += listOf("APP_CFLAGS+=-O3")
+                // Only the JNI library; upstream's Android.mk also defines a standalone binary.
+                targets += listOf("hev-socks5-tunnel")
             }
         }
     }

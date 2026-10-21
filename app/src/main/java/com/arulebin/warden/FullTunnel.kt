@@ -62,14 +62,14 @@ class FullTunnel(private val service: VpnService, private val toTun: (ByteArray,
               mtu: $MTU
             socks5:
               port: $port
-              address: 127.0.0.1
+              address: ${Socks5Server.LOOPBACK_V4.hostAddress}
               udp: 'udp'
             misc:
               log-level: warn
             """.trimIndent(),
         )
         running = true
-        TProxy.TProxyStartService(config.absolutePath, theirs!!.fd)
+        check(TProxy.TProxyStartService(config.absolutePath, theirs!!.fd)) { "stack did not start" }
         reader = Thread(::pumpToTun, "warden-stack").also { it.start() }
         true
     } catch (e: Exception) {

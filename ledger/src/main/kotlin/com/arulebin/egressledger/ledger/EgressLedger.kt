@@ -37,12 +37,13 @@ class LedgerEntry(val app: AppIdentity, val provider: Provider) {
         signals += signal
     }
 
+    /** Merges a persisted row in. Additive, so traffic recorded before the restore finished is kept. */
     @Synchronized
     internal fun restore(row: LedgerRow) {
-        firstSeen = row.firstSeen
-        lastSeen = row.lastSeen
-        connections = row.connections
-        blocked = row.blocked
+        firstSeen = if (connections == 0) row.firstSeen else minOf(firstSeen, row.firstSeen)
+        lastSeen = maxOf(lastSeen, row.lastSeen)
+        connections += row.connections
+        blocked += row.blocked
         hosts += row.hosts
         signals += row.signals
     }
@@ -84,7 +85,7 @@ class EgressLedger {
         changes.incrementAndGet()
     }
 
-    /** Loads persisted rows (on startup, before any traffic is recorded). */
+    /** Loads persisted rows on startup, merging with anything recorded in the meantime. */
     fun restore(rows: Collection<LedgerRow>) {
         for (row in rows) {
             val app = AppIdentity(row.uid, row.packages)
